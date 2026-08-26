@@ -7,6 +7,7 @@ import type { Category, OccurredPeriod, Place, Post, SourceType } from './types'
 import { isSupabaseConfigured } from './lib/supabase'
 import { distanceMeters, loadMapData, reportPost, savePost } from './lib/repository'
 import { geocode, type GeocodingResult } from './lib/geocoding'
+import { privacySafeSearchTerm, trackEvent } from './lib/analytics'
 const defaultPinIcon=L.divIcon({className:'map-marker',html:'<span class="pin"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 const activePinIcon=L.divIcon({className:'map-marker',html:'<span class="pin active"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 const draftIcon=L.divIcon({className:'map-marker',html:'<span class="pin draft"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
@@ -75,20 +76,23 @@ export default function App(){
     if(!isSupabaseConfigured)throw new Error('Supabase is not configured')
     const point=selectedPlace?{lat:selectedPlace.lat,lng:selectedPlace.lng}:draftPoint
     if(!point)throw new Error('Location is not selected')
-    await savePost({placeId:selectedPlace?.id,latitude:point.lat,longitude:point.lng,placeName:data.placeName||null,address:selectedPlace?.address||null,category:data.category,content:data.body,occurredAt:data.occurredAt,occurredPeriod:data.occurredPeriod,sourceType:data.sourceType})
+    const placeId=await savePost({placeId:selectedPlace?.id,latitude:point.lat,longitude:point.lng,placeName:data.placeName||null,address:selectedPlace?.address||null,category:data.category,content:data.body,occurredAt:data.occurredAt,occurredPeriod:data.occurredPeriod,sourceType:data.sourceType})
+    trackEvent('post_complete',{place_id:placeId,categories:data.category,source_type:data.sourceType})
     await refresh();setComposer(false);setDraftPoint(null);setToast('投稿を公開しました');setTimeout(()=>setToast(''),2600)
   }
   const chooseSearchResult=(result:GeocodingResult)=>{setSearchTarget(result);setSearchResults([]);setSearchError('');setSelected(null);setDraftPoint(null);showToast(`${result.name}へ移動しました`)}
   const search=async(e:React.FormEvent)=>{
     e.preventDefault();if(!query.trim()||searching)return
+    trackEvent('search',{search_term:privacySafeSearchTerm(query)})
     setSearching(true);setSearchError('');setSearchResults([])
     try{const results=await geocode(query);if(!results.length){setSearchError('場所が見つかりませんでした');showToast('場所が見つかりませんでした');return}chooseSearchResult(results[0]);setSearchResults(results.length>1?results:[])}
     catch(error){console.error('Place search failed',error);setSearchError('場所を検索できませんでした。時間をおいてもう一度お試しください')}
     finally{setSearching(false)}
   }
-  const handleReport=async(id:string)=>{try{await reportPost(id);setPosts(v=>v.map(p=>p.id===id?{...p,reports:p.reports+1}:p));setToast('通報を受け付けました')}catch(error){console.error('Report failed',error);setToast('通報を送信できませんでした')}}
+  const handleReport=async(id:string)=>{const reason='unspecified';try{await reportPost(id,reason);trackEvent('report_submit',{post_id:id,reason});setPosts(v=>v.map(p=>p.id===id?{...p,reports:p.reports+1}:p));setToast('通報を受け付けました')}catch(error){console.error('Report failed',error);setToast('通報を送信できませんでした')}}
   const showToast=(message:string)=>{setToast(message);setTimeout(()=>setToast(''),3500)}
-  if(view==='place'&&selectedPlace)return <PlaceDetail place={selectedPlace} posts={placePosts(selectedPlace.id)} onBack={()=>setView('map')} onPost={()=>setComposer(true)} onReport={handleReport} toast={toast}/>
+  const startPost=()=>{trackEvent('post_start',selectedPlace?{place_id:selectedPlace.id}:{});setComposer(true)}
+  if(view==='place'&&selectedPlace)return <PlaceDetail place={selectedPlace} posts={placePosts(selectedPlace.id)} onBack={()=>setView('map')} onPost={startPost} onReport={handleReport} toast={toast}/>
   return <main className="app-shell">
     <header className="topbar"><button className="brand" onClick={()=>setSelected(null)}><span className="brand-mark"><MapPin size={18}/></span><span><b>まちこえ</b><small>場所から知る、暮らしの声</small></span></button><button className="icon-button" aria-label="絞り込み" onClick={()=>setFiltersOpen(true)}><SlidersHorizontal size={20}/></button></header>
     {!isSupabaseConfigured&&<div className="dev-banner"><AlertCircle size={15}/><span>デモ表示：Supabaseの環境変数が設定されていません</span></div>}
@@ -99,16 +103,16 @@ export default function App(){
       <MapContainer center={[35.5148,137.8218]} zoom={13} zoomControl={false} attributionControl={true} zoomAnimation={false} fadeAnimation={false} markerZoomAnimation={false} preferCanvas={true}>
         <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" updateWhenIdle={true} updateWhenZooming={false} updateInterval={300} keepBuffer={1} maxNativeZoom={19} maxZoom={19}/>
         <MapController locateToken={locateToken} searchTarget={searchTarget} onLocationFound={()=>showToast('現在地へ移動しました')} onLocationError={()=>showToast('現在地を取得できませんでした。地図や検索はそのまま利用できます')}/><MapClick onPick={p=>{setDraftPoint(p);setSelected(null);setSearchTarget(null);setSearchResults([])}}/>
-        {visiblePlaces.map(p=><Marker key={p.id} position={[p.lat,p.lng]} icon={selected===p.id?activePinIcon:defaultPinIcon} eventHandlers={{click:()=>{setSelected(p.id);setDraftPoint(null)}}}/>) }
+        {visiblePlaces.map(p=><Marker key={p.id} position={[p.lat,p.lng]} icon={selected===p.id?activePinIcon:defaultPinIcon} eventHandlers={{click:()=>{trackEvent('pin_click',{place_id:p.id,category:placePosts(p.id)[0]?.category});setSelected(p.id);setDraftPoint(null)}}}/>) }
         {draftPoint&&<Marker position={[draftPoint.lat,draftPoint.lng]} icon={draftIcon}/>} 
         {searchTarget&&<Marker position={[searchTarget.lat,searchTarget.lng]} icon={searchIcon}/>}
       </MapContainer>
       <div className="map-tools"><button onClick={()=>setLocateToken(v=>v+1)} aria-label="現在地"><LocateFixed size={21}/></button><button onClick={()=>setFiltersOpen(true)} aria-label="フィルター"><Filter size={20}/><span>{activeCats.length}</span></button></div>
       <div className="map-hint">地図をタップして投稿場所を選べます</div>
-      {draftPoint&&!selectedPlace&&<div className="draft-card"><div><b>この場所に情報を追加</b><small>{draftPoint.lat.toFixed(5)}, {draftPoint.lng.toFixed(5)}</small></div><button onClick={()=>setComposer(true)}>ここに投稿</button></div>}
-      {selectedPlace&&<PlaceCard place={selectedPlace} posts={placePosts(selectedPlace.id)} onClose={()=>setSelected(null)} onDetail={()=>setView('place')} onPost={()=>setComposer(true)}/>} 
+      {draftPoint&&!selectedPlace&&<div className="draft-card"><div><b>この場所に情報を追加</b><small>{draftPoint.lat.toFixed(5)}, {draftPoint.lng.toFixed(5)}</small></div><button onClick={startPost}>ここに投稿</button></div>}
+      {selectedPlace&&<PlaceCard place={selectedPlace} posts={placePosts(selectedPlace.id)} onClose={()=>setSelected(null)} onDetail={()=>setView('place')} onPost={startPost}/>}
     </section>
-    <button className="post-fab" onClick={()=>setComposer(true)}><Plus size={22}/>この場所に投稿する</button>
+    <button className="post-fab" onClick={startPost}><Plus size={22}/>この場所に投稿する</button>
     <div className="map-credit">地図データ © OpenStreetMap</div>
     {filtersOpen&&<FilterSheet active={activeCats} setActive={setActiveCats} close={()=>setFiltersOpen(false)}/>} 
     {composer&&<Composer place={selectedPlace} point={draftPoint} nearby={draftPoint?places.map(place=>({place,distance:distanceMeters(draftPoint,place)})).filter(x=>x.distance<=80).sort((a,b)=>a.distance-b.distance):[]} onUseNearby={place=>{setSelected(place.id);setDraftPoint(null)}} close={()=>setComposer(false)} submit={submit}/>} 

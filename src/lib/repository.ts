@@ -22,16 +22,18 @@ export async function loadMapData():Promise<{places:Place[];posts:Post[]}> {
 
 export type NewPostInput = { placeId?:string; latitude:number; longitude:number; placeName:string|null; address:string|null; category:Category; content:string; occurredAt:string|null; occurredPeriod:OccurredPeriod; sourceType:SourceType }
 
-export async function savePost(input:NewPostInput):Promise<void> {
+export async function savePost(input:NewPostInput):Promise<string> {
   if (!supabase) throw new Error('Supabase is not configured')
   if (input.placeId) {
     const { data:sessionData }=await supabase.auth.getSession()
     const { error }=await supabase.from('posts').insert({ place_id:input.placeId, category:input.category, content:input.content, occurred_at:input.occurredAt, occurred_period:input.occurredPeriod, source_type:input.sourceType, status:'published', user_id:sessionData.session?.user.id || null })
     if(error) throw error
-    return
+    return input.placeId
   }
-  const { error }=await supabase.rpc('create_place_with_post', { p_latitude:input.latitude, p_longitude:input.longitude, p_name:input.placeName, p_address:input.address, p_category:input.category, p_content:input.content, p_occurred_at:input.occurredAt, p_occurred_period:input.occurredPeriod, p_source_type:input.sourceType })
+  const { data,error }=await supabase.rpc('create_place_with_post', { p_latitude:input.latitude, p_longitude:input.longitude, p_name:input.placeName, p_address:input.address, p_category:input.category, p_content:input.content, p_occurred_at:input.occurredAt, p_occurred_period:input.occurredPeriod, p_source_type:input.sourceType })
   if(error) throw error
+  if(!data)throw new Error('Place ID was not returned')
+  return String(data)
 }
 
 export async function reportPost(postId:string, reason='other'):Promise<void> {
