@@ -4,59 +4,69 @@
 -- このファイルはSQL Editorで手動実行するまで本番DBを変更しません。
 -- 座標は飯田市公式ページの施設情報とNominatim検索結果を突合できた地点だけを採用しています。
 
-begin;
-
-create temporary table seed_public_places(
-  public_data_key text primary key, name text not null, address text, latitude double precision not null, longitude double precision not null
-) on commit drop;
-
-insert into seed_public_places values
-  ('iida-public-place-central-library','飯田市立中央図書館','長野県飯田市追手町2丁目677番地3',35.5132069,137.8296314),
-  ('iida-public-place-city-hall','飯田市役所','長野県飯田市大久保町2534番地',35.5148591,137.8215335),
-  ('iida-public-place-kamihisakata-community-center','上久堅公民館','長野県飯田市上久堅3769',35.4608741,137.8824510),
-  ('iida-public-place-iida-station','飯田駅',null,35.5187725,137.8207373);
-
--- 同じseed key、同名地点、または約20m以内の既存地点があれば新規placeを作りません。
-insert into public.places(name,address,latitude,longitude,public_data_key)
-select s.name,s.address,s.latitude,s.longitude,s.public_data_key
-from seed_public_places s
-where not exists (
-  select 1 from public.places p where p.public_data_key=s.public_data_key
-    or lower(trim(coalesce(p.name,'')))=lower(trim(s.name))
-    or (abs(p.latitude-s.latitude)<0.00018 and abs(p.longitude-s.longitude)<0.00022)
-);
-
-create temporary table seed_public_place_map(public_data_key text primary key,place_id uuid not null) on commit drop;
-insert into seed_public_place_map
-select s.public_data_key,matched.id
-from seed_public_places s
-cross join lateral (
-  select p.id from public.places p
-  where p.public_data_key=s.public_data_key
-    or lower(trim(coalesce(p.name,'')))=lower(trim(s.name))
-    or (abs(p.latitude-s.latitude)<0.00018 and abs(p.longitude-s.longitude)<0.00022)
-  order by (p.public_data_key=s.public_data_key) desc,(lower(trim(coalesce(p.name,'')))=lower(trim(s.name))) desc,p.created_at asc
-  limit 1
-) matched;
-
-update public.places p set public_data_key=m.public_data_key
-from seed_public_place_map m where p.id=m.place_id and p.public_data_key is null;
-
-insert into public.posts(
-  place_id,category,content,occurred_at,occurred_period,source_type,status,report_count,user_id,
-  source_name,source_url,source_retrieved_at,public_data_key
-)
-select m.place_id,v.category,v.content,null,'unknown','public_source','published',0,null,v.source_name,v.source_url,date '2026-08-26',v.post_key
-from (values
+-- 一時テーブルを使わない単一SQL文です。全処理は1ステートメントとして原子的に実行されます。
+with
+seed_places(public_data_key,name,address,latitude,longitude) as (values
+  ('iida-public-place-central-library','飯田市立中央図書館','長野県飯田市追手町2丁目677番地3',35.5132069::double precision,137.8296314::double precision),
+  ('iida-public-place-city-hall','飯田市役所','長野県飯田市大久保町2534番地',35.5148591::double precision,137.8215335::double precision),
+  ('iida-public-place-kamihisakata-community-center','上久堅公民館','長野県飯田市上久堅3769',35.4608741::double precision,137.8824510::double precision),
+  ('iida-public-place-iida-station','飯田駅',null::text,35.5187725::double precision,137.8207373::double precision)
+),
+-- 同じseed key、同名地点、または約20m以内の既存地点を1件だけ選びます。
+existing_places as (
+  select s.public_data_key,matched.id as place_id
+  from seed_places s
+  cross join lateral (
+    select p.id from public.places p
+    where p.public_data_key=s.public_data_key
+      or lower(trim(coalesce(p.name,'')))=lower(trim(s.name))
+      or (abs(p.latitude-s.latitude)<0.00018 and abs(p.longitude-s.longitude)<0.00022)
+    order by (p.public_data_key=s.public_data_key) desc,
+      (lower(trim(coalesce(p.name,'')))=lower(trim(s.name))) desc,p.created_at asc
+    limit 1
+  ) matched
+),
+inserted_places as (
+  insert into public.places(name,address,latitude,longitude,public_data_key)
+  select s.name,s.address,s.latitude,s.longitude,s.public_data_key
+  from seed_places s
+  where not exists(select 1 from existing_places e where e.public_data_key=s.public_data_key)
+  on conflict (public_data_key) where public_data_key is not null
+  do update set public_data_key=excluded.public_data_key
+  returning public_data_key,id as place_id
+),
+place_map as (
+  select public_data_key,place_id from existing_places
+  union all
+  select public_data_key,place_id from inserted_places
+),
+tagged_existing_places as (
+  update public.places p set public_data_key=m.public_data_key
+  from place_map m
+  where p.id=m.place_id and p.public_data_key is null
+  returning p.id
+),
+seed_posts(post_key,place_key,category,content,source_name,source_url) as (values
   ('iida-public-post-central-library','iida-public-place-central-library','店舗・施設','飯田市公式情報をもとにした公開情報です。飯田市立中央図書館では、蔵書の貸し出し・返却受付や各種催事を行っています。最新の開館情報は出典ページで確認してください。','飯田市「中央図書館」','https://www.city.iida.lg.jp/soshiki/42/'),
   ('iida-public-post-city-hall','iida-public-place-city-hall','店舗・施設','飯田市公式情報をもとにした公開情報です。飯田市役所本庁舎の所在地や窓口案内は、飯田市公式の庁舎案内で確認できます。来庁前に最新情報を確認してください。','飯田市「飯田市役所のご案内」','https://www.city.iida.lg.jp/soshiki/8/cityhallguide.html'),
   ('iida-public-post-kamihisakata-community-center','iida-public-place-kamihisakata-community-center','店舗・施設','飯田市公式情報をもとにした公開情報です。上久堅公民館は、各種行事・催事や貸館による市民活動の場を提供しています。利用条件は出典ページで確認してください。','飯田市「上久堅公民館」','https://www.city.iida.lg.jp/soshiki/143/'),
   ('iida-public-post-iida-station-transit','iida-public-place-iida-station','道路・交通','飯田市公式情報をもとにした公開情報です。飯田駅周辺ではJR飯田線や市民バス・広域バスなどを利用できます。路線・運行時刻・運賃は変更されるため、最新情報を出典ページで確認してください。','飯田市「公共交通総合案内」','https://www.city.iida.lg.jp/soshiki/10/p0182.html')
-) as v(post_key,place_key,category,content,source_name,source_url)
-join seed_public_place_map m on m.public_data_key=v.place_key
-where not exists(select 1 from public.posts p where p.public_data_key=v.post_key);
-
-commit;
+),
+inserted_posts as (
+  insert into public.posts(
+    place_id,category,content,occurred_at,occurred_period,source_type,status,report_count,user_id,
+    source_name,source_url,source_retrieved_at,public_data_key
+  )
+  select m.place_id,s.category,s.content,null,'unknown','public_source','published',0,null,
+    s.source_name,s.source_url,date '2026-08-26',s.post_key
+  from seed_posts s join place_map m on m.public_data_key=s.place_key
+  on conflict (public_data_key) where public_data_key is not null do nothing
+  returning id
+)
+select
+  (select count(*) from inserted_places) as places_inserted,
+  (select count(*) from tagged_existing_places) as existing_places_tagged,
+  (select count(*) from inserted_posts) as posts_inserted;
 
 -- ===== 今回の除外・TODO（座標を推測しないため投入しません） =====
 -- 2. 丘の上結いスクエア3階 ムトスぷらざ
