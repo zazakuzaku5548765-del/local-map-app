@@ -6,11 +6,13 @@ import { categories, seedPlaces, seedPosts } from './data'
 import type { Category, OccurredPeriod, Place, Post, SourceType } from './types'
 import { isSupabaseConfigured } from './lib/supabase'
 import { distanceMeters, loadMapData, reportPost, savePost } from './lib/repository'
+import { geocode, type GeocodingResult } from './lib/geocoding'
 const defaultPinIcon=L.divIcon({className:'map-marker',html:'<span class="pin"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 const activePinIcon=L.divIcon({className:'map-marker',html:'<span class="pin active"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 const draftIcon=L.divIcon({className:'map-marker',html:'<span class="pin draft"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
+const searchIcon=L.divIcon({className:'map-marker',html:'<span class="pin search-pin"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 
-function MapController({locateToken,onLocationError,onLocationFound}:{locateToken:number;onLocationError:()=>void;onLocationFound:()=>void}){
+function MapController({locateToken,searchTarget,onLocationError,onLocationFound}:{locateToken:number;searchTarget:GeocodingResult|null;onLocationError:()=>void;onLocationFound:()=>void}){
   const map=useMap()
   useMapEvents({
     locationerror:()=>{map.stopLocate();onLocationError()},
@@ -26,6 +28,12 @@ function MapController({locateToken,onLocationError,onLocationFound}:{locateToke
     return()=>{cancelAnimationFrame(frame);observer.disconnect();window.removeEventListener('resize',updateSize);window.removeEventListener('orientationchange',updateSize);document.removeEventListener('visibilitychange',onVisible)}
   },[map])
   useEffect(()=>{if(!locateToken)return;map.stop();map.locate({setView:true,maxZoom:15,enableHighAccuracy:false,timeout:8000,maximumAge:60000})},[locateToken,map])
+  useEffect(()=>{
+    if(!searchTarget)return
+    map.stop()
+    if(searchTarget.boundingBox){const [south,north,west,east]=searchTarget.boundingBox;map.fitBounds([[south,west],[north,east]],{padding:[36,36],maxZoom:17,animate:false})}
+    else map.setView([searchTarget.lat,searchTarget.lng],16,{animate:false})
+  },[map,searchTarget])
   return null
 }
 function MapClick({onPick}:{onPick:(p:{lat:number;lng:number})=>void}){useMapEvents({click:e=>onPick(e.latlng)});return null}
@@ -43,6 +51,10 @@ export default function App(){
   const [filtersOpen,setFiltersOpen]=useState(false)
   const [activeCats,setActiveCats]=useState<Category[]>(categories.map(c=>c.name))
   const [query,setQuery]=useState('')
+  const [searchResults,setSearchResults]=useState<GeocodingResult[]>([])
+  const [searchTarget,setSearchTarget]=useState<GeocodingResult|null>(null)
+  const [searching,setSearching]=useState(false)
+  const [searchError,setSearchError]=useState('')
   const [locateToken,setLocateToken]=useState(0)
   const [view,setView]=useState<View>('map')
   const [toast,setToast]=useState('')
@@ -66,7 +78,14 @@ export default function App(){
     await savePost({placeId:selectedPlace?.id,latitude:point.lat,longitude:point.lng,placeName:data.placeName||null,address:selectedPlace?.address||null,category:data.category,content:data.body,occurredAt:data.occurredAt,occurredPeriod:data.occurredPeriod,sourceType:data.sourceType})
     await refresh();setComposer(false);setDraftPoint(null);setToast('投稿を公開しました');setTimeout(()=>setToast(''),2600)
   }
-  const search=async(e:React.FormEvent)=>{e.preventDefault();if(!query.trim())return;try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=jp&q=${encodeURIComponent(query)}`);const [hit]=await r.json();if(hit){setDraftPoint({lat:+hit.lat,lng:+hit.lon});setSelected(null);setToast('検索地点を選択しました')}else setToast('場所が見つかりませんでした')}catch{setToast('検索に接続できませんでした')}}
+  const chooseSearchResult=(result:GeocodingResult)=>{setSearchTarget(result);setSearchResults([]);setSearchError('');setSelected(null);setDraftPoint(null);showToast(`${result.name}へ移動しました`)}
+  const search=async(e:React.FormEvent)=>{
+    e.preventDefault();if(!query.trim()||searching)return
+    setSearching(true);setSearchError('');setSearchResults([])
+    try{const results=await geocode(query);if(!results.length){setSearchError('場所が見つかりませんでした');showToast('場所が見つかりませんでした');return}chooseSearchResult(results[0]);setSearchResults(results.length>1?results:[])}
+    catch(error){console.error('Place search failed',error);setSearchError('場所を検索できませんでした。時間をおいてもう一度お試しください')}
+    finally{setSearching(false)}
+  }
   const handleReport=async(id:string)=>{try{await reportPost(id);setPosts(v=>v.map(p=>p.id===id?{...p,reports:p.reports+1}:p));setToast('通報を受け付けました')}catch(error){console.error('Report failed',error);setToast('通報を送信できませんでした')}}
   const showToast=(message:string)=>{setToast(message);setTimeout(()=>setToast(''),3500)}
   if(view==='place'&&selectedPlace)return <PlaceDetail place={selectedPlace} posts={placePosts(selectedPlace.id)} onBack={()=>setView('map')} onPost={()=>setComposer(true)} onReport={handleReport} toast={toast}/>
@@ -75,13 +94,14 @@ export default function App(){
     {!isSupabaseConfigured&&<div className="dev-banner"><AlertCircle size={15}/><span>デモ表示：Supabaseの環境変数が設定されていません</span></div>}
     {loadError&&<div className="data-state error"><AlertCircle/><span>情報を読み込めませんでした</span><button onClick={refresh}>再試行</button></div>}
     {loading&&<div className="data-state"><LoaderCircle className="spin"/><span>地域情報を読み込み中…</span></div>}
-    <form className="searchbar" onSubmit={search}><Search size={19}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="住所・駅・施設を検索"/><button>検索</button></form>
+    <div className="search-area"><form className="searchbar" onSubmit={search}><Search size={19}/><input value={query} onChange={e=>{setQuery(e.target.value);setSearchError('')}} placeholder="住所・駅・施設を検索" aria-label="場所を検索"/><button disabled={searching} aria-label="検索する">{searching?<LoaderCircle className="spin" size={17}/>:<><span>検索</span><Search size={17}/></>}</button></form>{searchError&&<div className="search-message" role="status">{searchError}</div>}{searchResults.length>0&&<div className="search-results" role="listbox" aria-label="検索候補">{searchResults.map((result,index)=><button key={result.id} role="option" aria-selected={searchTarget?.id===result.id} onClick={()=>chooseSearchResult(result)}><MapPin size={17}/><span><b>{index===0?'最上位候補：':''}{result.name}</b><small>{result.displayName}</small></span></button>)}</div>}</div>
     <section className="map-wrap">
       <MapContainer center={[35.5148,137.8218]} zoom={13} zoomControl={false} attributionControl={true} zoomAnimation={false} fadeAnimation={false} markerZoomAnimation={false} preferCanvas={true}>
         <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" updateWhenIdle={true} updateWhenZooming={false} updateInterval={300} keepBuffer={1} maxNativeZoom={19} maxZoom={19}/>
-        <MapController locateToken={locateToken} onLocationFound={()=>showToast('現在地へ移動しました')} onLocationError={()=>showToast('現在地を取得できませんでした。地図や検索はそのまま利用できます')}/><MapClick onPick={p=>{setDraftPoint(p);setSelected(null)}}/>
+        <MapController locateToken={locateToken} searchTarget={searchTarget} onLocationFound={()=>showToast('現在地へ移動しました')} onLocationError={()=>showToast('現在地を取得できませんでした。地図や検索はそのまま利用できます')}/><MapClick onPick={p=>{setDraftPoint(p);setSelected(null);setSearchTarget(null);setSearchResults([])}}/>
         {visiblePlaces.map(p=><Marker key={p.id} position={[p.lat,p.lng]} icon={selected===p.id?activePinIcon:defaultPinIcon} eventHandlers={{click:()=>{setSelected(p.id);setDraftPoint(null)}}}/>) }
         {draftPoint&&<Marker position={[draftPoint.lat,draftPoint.lng]} icon={draftIcon}/>} 
+        {searchTarget&&<Marker position={[searchTarget.lat,searchTarget.lng]} icon={searchIcon}/>}
       </MapContainer>
       <div className="map-tools"><button onClick={()=>setLocateToken(v=>v+1)} aria-label="現在地"><LocateFixed size={21}/></button><button onClick={()=>setFiltersOpen(true)} aria-label="フィルター"><Filter size={20}/><span>{activeCats.length}</span></button></div>
       <div className="map-hint">地図をタップして投稿場所を選べます</div>

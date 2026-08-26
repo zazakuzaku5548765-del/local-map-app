@@ -2,6 +2,12 @@
 
 「誰が」ではなく「どこで、何が起きたか」を主役にした地域情報マップです。React / TypeScript / Vite / Leaflet / Supabaseで構成しています。
 
+## 場所検索
+
+地名、住所、駅名、施設名の検索にはOpenStreetMapのNominatimを使用します。検索ボタンまたはEnterを押したときだけ通信し、入力中の自動補完は行いません。同一検索結果はブラウザへ7日間キャッシュし、連続リクエストは1秒以上の間隔を空けます。公開Nominatimは小規模利用向けで、アプリの利用が増えた場合はプロキシまたは商用・セルフホストのNominatim互換サービスへ切り替えてください。切り替え先は`VITE_GEOCODING_URL`で指定できます。
+
+[Nominatim Usage Policy](https://operations.osmfoundation.org/policies/nominatim/)も公開前に確認してください。検索欄へ個人情報や機密情報を入力しないでください。
+
 ## ローカル起動
 
 ```powershell
