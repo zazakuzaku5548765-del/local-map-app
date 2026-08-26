@@ -2,10 +2,10 @@ import { supabase } from './supabase'
 import type { Category, OccurredPeriod, Place, Post, SourceType } from '../types'
 
 type PlaceRow = { id:string; name:string|null; address:string|null; latitude:number; longitude:number; created_at:string; updated_at:string }
-type PostRow = { id:string; place_id:string; category:Category; content:string; occurred_at:string|null; occurred_period:OccurredPeriod; source_type:SourceType; created_at:string; updated_at:string; status:Post['status']; report_count:number; user_id:string|null; image_urls:string[]|null }
+type PostRow = { id:string; place_id:string; category:Category; content:string; occurred_at:string|null; occurred_period:OccurredPeriod; source_type:SourceType; source_name:string|null; source_url:string|null; source_retrieved_at:string|null; created_at:string; updated_at:string; status:Post['status']; report_count:number; user_id:string|null; image_urls:string[]|null }
 
 const toPlace = (row:PlaceRow):Place => ({ id:row.id, name:row.name || '名称未設定の地点', address:row.address || '住所情報なし', lat:row.latitude, lng:row.longitude, summary:'地域のみなさんからの情報', createdAt:row.created_at, updatedAt:row.updated_at })
-const toPost = (row:PostRow):Post => ({ id:row.id, placeId:row.place_id, category:row.category, body:row.content, occurredAt:row.occurred_at, occurredPeriod:row.occurred_period, sourceType:row.source_type, createdAt:row.created_at, updatedAt:row.updated_at, authorId:row.user_id, imageUrls:row.image_urls || [], status:row.status, reports:row.report_count, helpful:0, verification:['未確認'] })
+const toPost = (row:PostRow):Post => ({ id:row.id, placeId:row.place_id, category:row.category, body:row.content, occurredAt:row.occurred_at, occurredPeriod:row.occurred_period, sourceType:row.source_type, sourceName:row.source_name, sourceUrl:row.source_url, sourceRetrievedAt:row.source_retrieved_at, createdAt:row.created_at, updatedAt:row.updated_at, authorId:row.user_id, imageUrls:row.image_urls || [], status:row.status, reports:row.report_count, helpful:0, verification:row.source_type==='public_source'?['飯田市公式情報をもとにした公開情報']:['未確認'] })
 
 export async function loadMapData():Promise<{places:Place[];posts:Post[]}> {
   if (!supabase) throw new Error('Supabase is not configured')

@@ -8,6 +8,25 @@
 
 [Nominatim Usage Policy](https://operations.osmfoundation.org/policies/nominatim/)も公開前に確認してください。検索欄へ個人情報や機密情報を入力しないでください。
 
+## 飯田市公的情報seed
+
+公的情報の初期データは自動投入されません。Supabase SQL Editorで、必ず次の順番に1ファイルずつ実行します。
+
+1. `supabase/migrations/20260826_01_add_public_source_enum.sql`
+2. `supabase/migrations/20260826_public_sources.sql`
+3. `supabase/seed_public_data.sql`
+
+1番目の実行が成功してからSQL Editorで新しいクエリを作り、2番目を実行してください。enum追加と利用を同じトランザクションにしないためです。seedは再実行しても`public_data_key`により同じ地点・投稿を増やしません。投入前にseed末尾の「除外・TODO」、各出典URL、取得日、4地点の名称と座標を確認してください。
+
+投入後はSQL Editorで次を実行すると、今回の公的投稿だけを確認できます。
+
+```sql
+select p.name, po.category, po.source_name, po.source_url, po.source_retrieved_at
+from public.posts po join public.places p on p.id = po.place_id
+where po.source_type = 'public_source'
+order by p.name;
+```
+
 ## ローカル起動
 
 ```powershell

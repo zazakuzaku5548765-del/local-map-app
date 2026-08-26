@@ -3,7 +3,7 @@
 create extension if not exists pgcrypto;
 
 do $$ begin create type public.occurred_period as enum ('today','recent','this_month','date','unknown'); exception when duplicate_object then null; end $$;
-do $$ begin create type public.source_type as enum ('firsthand','observed','resident_experience','heard_from_others','other'); exception when duplicate_object then null; end $$;
+do $$ begin create type public.source_type as enum ('firsthand','observed','resident_experience','heard_from_others','other','public_source'); exception when duplicate_object then null; end $$;
 do $$ begin create type public.post_status as enum ('published','pending','hidden'); exception when duplicate_object then null; end $$;
 
 create table if not exists public.places (
@@ -15,8 +15,11 @@ create table if not exists public.posts (
   occurred_at date, occurred_period public.occurred_period not null default 'unknown', source_type public.source_type not null,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(), status public.post_status not null default 'published', report_count integer not null default 0 check (report_count >= 0),
   user_id uuid references auth.users(id) on delete set null, image_urls text[] not null default '{}', moderation_result jsonb,
-  constraint occurred_date_consistency check ((occurred_period = 'date' and occurred_at is not null) or (occurred_period <> 'date' and occurred_at is null))
+  source_name text, source_url text, source_retrieved_at date, public_data_key text,
+  constraint occurred_date_consistency check ((occurred_period = 'date' and occurred_at is not null) or (occurred_period <> 'date' and occurred_at is null)),
+  constraint posts_public_source_attribution_check check (source_type <> 'public_source' or (user_id is null and source_name is not null and source_url is not null and source_retrieved_at is not null and public_data_key is not null))
 );
+alter table public.places add column if not exists public_data_key text;
 create table if not exists public.reports (
   id uuid primary key default gen_random_uuid(), post_id uuid not null references public.posts(id) on delete cascade, reporter_id uuid references auth.users(id) on delete set null, reason text not null, created_at timestamptz not null default now()
 );
@@ -26,6 +29,8 @@ create index if not exists places_latitude_longitude_idx on public.places(latitu
 create index if not exists posts_place_created_idx on public.posts(place_id, created_at desc);
 create index if not exists posts_public_map_idx on public.posts(status, created_at desc);
 create index if not exists reports_post_idx on public.reports(post_id);
+create unique index if not exists places_public_data_key_uidx on public.places(public_data_key) where public_data_key is not null;
+create unique index if not exists posts_public_data_key_uidx on public.posts(public_data_key) where public_data_key is not null;
 
 create or replace function public.set_updated_at() returns trigger language plpgsql set search_path = public, pg_temp as $$ begin new.updated_at = now(); return new; end; $$;
 drop trigger if exists places_set_updated_at on public.places;
@@ -46,9 +51,9 @@ drop policy if exists "published posts readable by everyone" on public.posts;
 create policy "published posts readable by everyone" on public.posts for select to anon, authenticated using (status = 'published');
 -- ログイン導入時は次のanon policyを削除し、authenticated policyだけにします。
 drop policy if exists "anonymous users create posts" on public.posts;
-create policy "anonymous users create posts" on public.posts for insert to anon with check (user_id is null and status = 'published');
+create policy "anonymous users create posts" on public.posts for insert to anon with check (user_id is null and status = 'published' and source_type <> 'public_source' and source_name is null and source_url is null and source_retrieved_at is null and public_data_key is null);
 drop policy if exists "authenticated users create own posts" on public.posts;
-create policy "authenticated users create own posts" on public.posts for insert to authenticated with check (user_id = auth.uid() and status in ('published','pending'));
+create policy "authenticated users create own posts" on public.posts for insert to authenticated with check (user_id = auth.uid() and status in ('published','pending') and source_type <> 'public_source' and source_name is null and source_url is null and source_retrieved_at is null and public_data_key is null);
 
 -- 新規地点と最初の投稿を同じDB transaction内で作成します。
 create or replace function public.create_place_with_post(
@@ -57,6 +62,7 @@ create or replace function public.create_place_with_post(
 ) returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
 declare new_place_id uuid;
 begin
+  if p_source_type = 'public_source' then raise exception 'public_source is reserved for managed seed data'; end if;
   if p_latitude not between -90 and 90 or p_longitude not between -180 and 180 then raise exception 'invalid coordinates'; end if;
   if char_length(p_content) not between 15 and 500 then raise exception 'invalid content length'; end if;
   insert into public.places(latitude,longitude,name,address) values(p_latitude,p_longitude,nullif(trim(p_name),''),nullif(trim(p_address),'')) returning id into new_place_id;
