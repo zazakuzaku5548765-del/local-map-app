@@ -19,11 +19,10 @@ existing_places as (
     select p.id
     from public.places p
     where p.public_data_key=s.public_data_key
-       or lower(trim(coalesce(p.name,'')))=lower(trim(s.name))
-       or (abs(p.latitude-s.latitude)<0.00018 and abs(p.longitude-s.longitude)<0.00022)
+       or regexp_replace(lower(trim(coalesce(p.name,''))),'\s+','','g')=regexp_replace(lower(trim(s.name)),'\s+','','g')
     order by
       (p.public_data_key=s.public_data_key) desc,
-      (lower(trim(coalesce(p.name,'')))=lower(trim(s.name))) desc,
+      (regexp_replace(lower(trim(coalesce(p.name,''))),'\s+','','g')=regexp_replace(lower(trim(s.name)),'\s+','','g')) desc,
       p.created_at asc
     limit 1
   ) matched
