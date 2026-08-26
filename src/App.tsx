@@ -6,13 +6,26 @@ import { categories, seedPlaces, seedPosts } from './data'
 import type { Category, OccurredPeriod, Place, Post, SourceType } from './types'
 import { isSupabaseConfigured } from './lib/supabase'
 import { distanceMeters, loadMapData, reportPost, savePost } from './lib/repository'
-const pinIcon=(active=false)=>L.divIcon({className:'map-marker',html:`<span class="pin ${active?'active':''}"><i></i></span>`,iconSize:[38,48],iconAnchor:[19,44]})
+const defaultPinIcon=L.divIcon({className:'map-marker',html:'<span class="pin"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
+const activePinIcon=L.divIcon({className:'map-marker',html:'<span class="pin active"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 const draftIcon=L.divIcon({className:'map-marker',html:'<span class="pin draft"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 
 function MapController({locateToken,onLocationError,onLocationFound}:{locateToken:number;onLocationError:()=>void;onLocationFound:()=>void}){
   const map=useMap()
-  useMapEvents({locationerror:onLocationError,locationfound:onLocationFound})
-  useEffect(()=>{if(!locateToken)return;map.locate({setView:true,maxZoom:16})},[locateToken,map])
+  useMapEvents({
+    locationerror:()=>{map.stopLocate();onLocationError()},
+    locationfound:()=>{requestAnimationFrame(()=>map.invalidateSize({pan:false,debounceMoveend:true}));onLocationFound()}
+  })
+  useEffect(()=>{
+    const container=map.getContainer()
+    let frame=0
+    const updateSize=()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>map.invalidateSize({pan:false,debounceMoveend:true}))}
+    const observer=new ResizeObserver(updateSize)
+    const onVisible=()=>{if(document.visibilityState==='visible')updateSize()}
+    observer.observe(container);window.addEventListener('resize',updateSize,{passive:true});window.addEventListener('orientationchange',updateSize);document.addEventListener('visibilitychange',onVisible);updateSize()
+    return()=>{cancelAnimationFrame(frame);observer.disconnect();window.removeEventListener('resize',updateSize);window.removeEventListener('orientationchange',updateSize);document.removeEventListener('visibilitychange',onVisible)}
+  },[map])
+  useEffect(()=>{if(!locateToken)return;map.stop();map.locate({setView:true,maxZoom:15,enableHighAccuracy:false,timeout:8000,maximumAge:60000})},[locateToken,map])
   return null
 }
 function MapClick({onPick}:{onPick:(p:{lat:number;lng:number})=>void}){useMapEvents({click:e=>onPick(e.latlng)});return null}
@@ -64,10 +77,10 @@ export default function App(){
     {loading&&<div className="data-state"><LoaderCircle className="spin"/><span>地域情報を読み込み中…</span></div>}
     <form className="searchbar" onSubmit={search}><Search size={19}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="住所・駅・施設を検索"/><button>検索</button></form>
     <section className="map-wrap">
-      <MapContainer center={[35.5148,137.8218]} zoom={14} zoomControl={false} attributionControl={true}>
-        <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+      <MapContainer center={[35.5148,137.8218]} zoom={13} zoomControl={false} attributionControl={true} zoomAnimation={false} fadeAnimation={false} markerZoomAnimation={false} preferCanvas={true}>
+        <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" updateWhenIdle={true} updateWhenZooming={false} updateInterval={300} keepBuffer={1} maxNativeZoom={19} maxZoom={19}/>
         <MapController locateToken={locateToken} onLocationFound={()=>showToast('現在地へ移動しました')} onLocationError={()=>showToast('現在地を取得できませんでした。地図や検索はそのまま利用できます')}/><MapClick onPick={p=>{setDraftPoint(p);setSelected(null)}}/>
-        {visiblePlaces.map(p=><Marker key={p.id} position={[p.lat,p.lng]} icon={pinIcon(selected===p.id)} eventHandlers={{click:()=>{setSelected(p.id);setDraftPoint(null)}}}/>) }
+        {visiblePlaces.map(p=><Marker key={p.id} position={[p.lat,p.lng]} icon={selected===p.id?activePinIcon:defaultPinIcon} eventHandlers={{click:()=>{setSelected(p.id);setDraftPoint(null)}}}/>) }
         {draftPoint&&<Marker position={[draftPoint.lat,draftPoint.lng]} icon={draftIcon}/>} 
       </MapContainer>
       <div className="map-tools"><button onClick={()=>setLocateToken(v=>v+1)} aria-label="現在地"><LocateFixed size={21}/></button><button onClick={()=>setFiltersOpen(true)} aria-label="フィルター"><Filter size={20}/><span>{activeCats.length}</span></button></div>
