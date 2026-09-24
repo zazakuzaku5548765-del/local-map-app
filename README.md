@@ -27,6 +27,21 @@ where po.source_type = 'public_source'
 order by p.name;
 ```
 
+## 投稿写真・掲載期限のセットアップ
+
+既存のSupabaseプロジェクトでは、アプリを公開する前に`supabase/migrations/20260924_post_photos_and_expiration.sql`を適用してください。このmigrationは既存投稿を削除せず、既存投稿の`expires_at`はNULL（期限なし）のままです。
+
+1. Supabase Dashboardで対象プロジェクトを開きます。
+2. 左メニューの`SQL Editor`を開き、`New query`を押します。
+3. `supabase/migrations/20260924_post_photos_and_expiration.sql`の全文を貼り付けます。
+4. 対象プロジェクトが本番環境であることを再確認し、`Run`を1回押します。
+5. 左メニューの`Storage`で`post-images`がPublic bucketとして存在することを確認します。SQLがBucketと制限を作成するため、画面から手動作成する必要はありません。
+6. `Table Editor`で`posts.expires_at`、`post_images`、`post_media_tokens`が作成されたことを確認します。
+
+写真は最大3枚、アップロード前15MB/枚まで受け付け、ブラウザで長辺1600pxのWebPへ圧縮します。`post_images.storage_path`を独立管理しているため、管理者は将来、写真だけをStorage APIで削除して`deleted_at`を設定できます。投稿全体を削除する場合も、先に`storage_path`のファイルをStorage APIで削除してから投稿を削除してください。
+
+期限切れ投稿は削除されず、一般公開用RLSとアプリの両方で非表示になります。将来の管理画面ではservice roleを使って確認し、`expires_at`をNULLまたは未来日時へ変更することで復元できます。service role keyをブラウザへ配置しないでください。
+
 ## ローカル起動
 
 ```powershell
