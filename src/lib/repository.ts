@@ -5,27 +5,35 @@ import { compressImage, validateImageFiles } from './images'
 type PlaceRow = { id:string; name:string|null; address:string|null; latitude:number; longitude:number; created_at:string; updated_at:string }
 type PostRow = { id:string; place_id:string; category:Category; content:string; occurred_at:string|null; occurred_period:OccurredPeriod; source_type:SourceType; source_name:string|null; source_url:string|null; source_retrieved_at:string|null; expires_at?:string|null; created_at:string; updated_at:string; status:Post['status']; report_count:number; user_id:string|null; image_urls:string[]|null }
 type PostImageRow={post_id:string;storage_path:string;sort_order:number}
+type MapPostRow=PostRow&{places:PlaceRow|PlaceRow[]}
+export type MapBounds={south:number;west:number;north:number;east:number}
 
 const toPlace = (row:PlaceRow):Place => ({ id:row.id, name:row.name || '名称未設定の地点', address:row.address || '住所情報なし', lat:row.latitude, lng:row.longitude, summary:'地域のみなさんからの情報', createdAt:row.created_at, updatedAt:row.updated_at })
 const toPost = (row:PostRow,imageUrls:string[]):Post => ({ id:row.id, placeId:row.place_id, category:row.category, body:row.content, occurredAt:row.occurred_at, occurredPeriod:row.occurred_period, sourceType:row.source_type, sourceName:row.source_name, sourceUrl:row.source_url, sourceRetrievedAt:row.source_retrieved_at, expiresAt:row.expires_at||null, createdAt:row.created_at, updatedAt:row.updated_at, authorId:row.user_id, imageUrls:[...(row.image_urls||[]),...imageUrls], status:row.status, reports:row.report_count, helpful:0, verification:row.source_type==='public_source'?['飯田市公式情報をもとにした公開情報']:['未確認'] })
 
-export async function loadMapData():Promise<{places:Place[];posts:Post[]}> {
+export async function loadMapData(bounds:MapBounds):Promise<{places:Place[];posts:Post[]}> {
   if (!supabase) throw new Error('Supabase is not configured')
-  const [placesResult,postsResult,imagesResult]=await Promise.all([
-    supabase.from('places').select('*').order('created_at', { ascending:true }),
-    supabase.from('posts').select('*').eq('status','published').order('created_at',{ascending:false}),
-    supabase.from('post_images').select('post_id,storage_path,sort_order').is('deleted_at',null).order('sort_order',{ascending:true})
-  ])
-  if (placesResult.error) throw placesResult.error
+  const postsResult=await supabase.from('posts')
+    .select('id,place_id,category,content,occurred_at,occurred_period,source_type,source_name,source_url,source_retrieved_at,expires_at,created_at,updated_at,status,report_count,user_id,image_urls,places!inner(id,name,address,latitude,longitude,created_at,updated_at)')
+    .eq('status','published')
+    .gte('places.latitude',bounds.south).lte('places.latitude',bounds.north)
+    .gte('places.longitude',bounds.west).lte('places.longitude',bounds.east)
+    .order('created_at',{ascending:false}).limit(500)
   if (postsResult.error) throw postsResult.error
+  const rows=postsResult.data as unknown as MapPostRow[]
+  const postIds=rows.map(row=>row.id)
+  const imagesResult=postIds.length
+    ?await supabase.from('post_images').select('post_id,storage_path,sort_order').in('post_id',postIds).is('deleted_at',null).order('sort_order',{ascending:true})
+    :{data:[] as PostImageRow[],error:null}
   if(imagesResult.error&&imagesResult.error.code!=='42P01')console.warn('Post images could not be loaded',imagesResult.error)
   const imageRows=imagesResult.error?[]:imagesResult.data as PostImageRow[]
   const imageUrls=new Map<string,string[]>()
   for(const image of imageRows){const url=supabase.storage.from('post-images').getPublicUrl(image.storage_path).data.publicUrl;imageUrls.set(image.post_id,[...(imageUrls.get(image.post_id)||[]),url])}
   const now=Date.now()
-  const posts=(postsResult.data as PostRow[]).filter(row=>!row.expires_at||new Date(row.expires_at).getTime()>now).map(row=>toPost(row,imageUrls.get(row.id)||[]))
-  const activeIds=new Set(posts.map(post=>post.placeId))
-  return { places:(placesResult.data as PlaceRow[]).map(toPlace).filter(place=>activeIds.has(place.id)), posts }
+  const posts=rows.filter(row=>!row.expires_at||new Date(row.expires_at).getTime()>now).map(row=>toPost(row,imageUrls.get(row.id)||[]))
+  const places=new Map<string,Place>()
+  for(const row of rows){const place=Array.isArray(row.places)?row.places[0]:row.places;if(place)places.set(place.id,toPlace(place))}
+  return {places:[...places.values()],posts}
 }
 
 export type NewPostInput = { placeId?:string; latitude:number; longitude:number; placeName:string|null; address:string|null; category:Category; content:string; occurredAt:string|null; occurredPeriod:OccurredPeriod; sourceType:SourceType; expiryDays:ExpiryDays }

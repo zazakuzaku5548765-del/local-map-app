@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
 import { AlertCircle, Check, ChevronLeft, Clock3, Filter, Flag, ImagePlus, LoaderCircle, LocateFixed, MapPin, Plus, Search, ShieldCheck, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { categories, seedPlaces, seedPosts } from './data'
 import type { Category, ExpiryDays, OccurredPeriod, Place, Post, SourceType } from './types'
 import { isSupabaseConfigured } from './lib/supabase'
-import { distanceMeters, loadMapData, reportPost, savePost, uploadPostImages } from './lib/repository'
+import { distanceMeters, loadMapData, reportPost, savePost, uploadPostImages, type MapBounds } from './lib/repository'
 import { validateImageFiles } from './lib/images'
 import { geocode, type GeocodingResult } from './lib/geocoding'
 import { privacySafeSearchTerm, trackEvent } from './lib/analytics'
@@ -14,21 +14,23 @@ const activePinIcon=L.divIcon({className:'map-marker',html:'<span class="pin act
 const draftIcon=L.divIcon({className:'map-marker',html:'<span class="pin draft"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 const searchIcon=L.divIcon({className:'map-marker',html:'<span class="pin search-pin"><i></i></span>',iconSize:[38,48],iconAnchor:[19,44]})
 
-function MapController({locateToken,searchTarget,onLocationError,onLocationFound}:{locateToken:number;searchTarget:GeocodingResult|null;onLocationError:()=>void;onLocationFound:()=>void}){
+function MapController({locateToken,searchTarget,onBoundsChange,onLocationError,onLocationFound}:{locateToken:number;searchTarget:GeocodingResult|null;onBoundsChange:(bounds:MapBounds)=>void;onLocationError:()=>void;onLocationFound:()=>void}){
   const map=useMap()
+  const emitBounds=useCallback(()=>{const bounds=map.getBounds().pad(.35);onBoundsChange({south:bounds.getSouth(),west:bounds.getWest(),north:bounds.getNorth(),east:bounds.getEast()})},[map,onBoundsChange])
   useMapEvents({
+    moveend:emitBounds,
     locationerror:()=>{map.stopLocate();onLocationError()},
-    locationfound:()=>{requestAnimationFrame(()=>map.invalidateSize({pan:false,debounceMoveend:true}));onLocationFound()}
+    locationfound:()=>{requestAnimationFrame(()=>{map.invalidateSize({pan:false,debounceMoveend:true});emitBounds()});onLocationFound()}
   })
   useEffect(()=>{
     const container=map.getContainer()
     let frame=0
-    const updateSize=()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>map.invalidateSize({pan:false,debounceMoveend:true}))}
+    const updateSize=()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{map.invalidateSize({pan:false,debounceMoveend:true});emitBounds()})}
     const observer=new ResizeObserver(updateSize)
     const onVisible=()=>{if(document.visibilityState==='visible')updateSize()}
     observer.observe(container);window.addEventListener('resize',updateSize,{passive:true});window.addEventListener('orientationchange',updateSize);document.addEventListener('visibilitychange',onVisible);updateSize()
     return()=>{cancelAnimationFrame(frame);observer.disconnect();window.removeEventListener('resize',updateSize);window.removeEventListener('orientationchange',updateSize);document.removeEventListener('visibilitychange',onVisible)}
-  },[map])
+  },[map,emitBounds])
   useEffect(()=>{if(!locateToken)return;map.stop();map.locate({setView:true,maxZoom:15,enableHighAccuracy:false,timeout:8000,maximumAge:60000})},[locateToken,map])
   useEffect(()=>{
     if(!searchTarget)return
@@ -39,6 +41,10 @@ function MapController({locateToken,searchTarget,onLocationError,onLocationFound
   return null
 }
 function MapClick({onPick}:{onPick:(p:{lat:number;lng:number})=>void}){useMapEvents({click:e=>onPick(e.latlng)});return null}
+
+const MapMarkers=memo(function MapMarkers({places,selected,postsByPlace,onSelect}:{places:Place[];selected:string|null;postsByPlace:Map<string,Post[]>;onSelect:(place:Place,category?:Category)=>void}){
+  return <>{places.map(place=><Marker key={place.id} position={[place.lat,place.lng]} icon={selected===place.id?activePinIcon:defaultPinIcon} eventHandlers={{click:()=>onSelect(place,postsByPlace.get(place.id)?.[0]?.category)}}/>)}</>
+})
 
 type View='map'|'place'
 const periodOptions:{value:OccurredPeriod;label:string}[]=[{value:'today',label:'今日'},{value:'recent',label:'最近'},{value:'this_month',label:'今月'},{value:'date',label:'日付指定'},{value:'unknown',label:'時期不明'}]
@@ -61,19 +67,25 @@ export default function App(){
   const [locateToken,setLocateToken]=useState(0)
   const [view,setView]=useState<View>('map')
   const [toast,setToast]=useState('')
-  const [loading,setLoading]=useState(isSupabaseConfigured)
+  const [loading,setLoading]=useState(false)
   const [loadError,setLoadError]=useState(false)
-  const refresh=async()=>{
-    if(!isSupabaseConfigured)return
+  const [mapBounds,setMapBounds]=useState<MapBounds|null>(null)
+  const requestId=useRef(0)
+  const refresh=useCallback(async(bounds=mapBounds)=>{
+    if(!isSupabaseConfigured||!bounds)return
+    const id=++requestId.current
     setLoading(true);setLoadError(false)
-    try{const data=await loadMapData();setPlaces(data.places);setPosts(data.posts)}
-    catch(error){console.error('Supabase data load failed',error);setLoadError(true)}
-    finally{setLoading(false)}
-  }
-  useEffect(()=>{void refresh()},[])
+    try{const data=await loadMapData(bounds);if(id===requestId.current){setPlaces(data.places);setPosts(data.posts)}}
+    catch(error){if(id===requestId.current){console.error('Supabase data load failed',error);setLoadError(true)}}
+    finally{if(id===requestId.current)setLoading(false)}
+  },[mapBounds])
+  useEffect(()=>{if(!mapBounds)return;const timer=window.setTimeout(()=>void refresh(mapBounds),180);return()=>window.clearTimeout(timer)},[mapBounds,refresh])
+  const handleBoundsChange=useCallback((bounds:MapBounds)=>setMapBounds(previous=>previous&&Math.abs(previous.south-bounds.south)<.0001&&Math.abs(previous.west-bounds.west)<.0001&&Math.abs(previous.north-bounds.north)<.0001&&Math.abs(previous.east-bounds.east)<.0001?previous:bounds),[])
   const selectedPlace=places.find(p=>p.id===selected)||null
-  const visiblePlaces=useMemo(()=>places.filter(p=>posts.some(x=>x.placeId===p.id&&activeCats.includes(x.category))),[places,posts,activeCats])
-  const placePosts=(id:string)=>posts.filter(p=>p.placeId===id&&p.status==='published').sort((a,b)=>b.createdAt.localeCompare(a.createdAt))
+  const postsByPlace=useMemo(()=>{const result=new Map<string,Post[]>();for(const post of posts){if(post.status!=='published')continue;const list=result.get(post.placeId)||[];list.push(post);result.set(post.placeId,list)}for(const list of result.values())list.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));return result},[posts])
+  const visiblePlaces=useMemo(()=>places.filter(place=>postsByPlace.get(place.id)?.some(post=>activeCats.includes(post.category))),[places,postsByPlace,activeCats])
+  const placePosts=(id:string)=>postsByPlace.get(id)||[]
+  const selectMarker=useCallback((place:Place,category?:Category)=>{trackEvent('pin_click',{place_id:place.id,category});setSelected(place.id);setDraftPoint(null)},[])
   const submit=async(data:{category:Category;body:string;occurredAt:string|null;occurredPeriod:OccurredPeriod;sourceType:SourceType;files:File[];placeName:string;expiryDays:ExpiryDays})=>{
     if(!isSupabaseConfigured)throw new Error('Supabase is not configured')
     const point=selectedPlace?{lat:selectedPlace.lat,lng:selectedPlace.lng}:draftPoint
@@ -100,14 +112,14 @@ export default function App(){
   return <main className="app-shell">
     <header className="topbar"><button className="brand" onClick={()=>setSelected(null)}><span className="brand-mark"><MapPin size={18}/></span><span><b>まちこえ</b><small>場所から知る、暮らしの声</small></span></button><button className="icon-button" aria-label="絞り込み" onClick={()=>setFiltersOpen(true)}><SlidersHorizontal size={20}/></button></header>
     {!isSupabaseConfigured&&<div className="dev-banner"><AlertCircle size={15}/><span>デモ表示：Supabaseの環境変数が設定されていません</span></div>}
-    {loadError&&<div className="data-state error"><AlertCircle/><span>情報を読み込めませんでした</span><button onClick={refresh}>再試行</button></div>}
+    {loadError&&<div className="data-state error"><AlertCircle/><span>情報を読み込めませんでした</span><button onClick={()=>void refresh()}>再試行</button></div>}
     {loading&&<div className="data-state"><LoaderCircle className="spin"/><span>地域情報を読み込み中…</span></div>}
     <div className="search-area"><form className="searchbar" onSubmit={search}><Search size={19}/><input value={query} onChange={e=>{setQuery(e.target.value);setSearchError('')}} placeholder="住所・駅・施設を検索" aria-label="場所を検索"/><button disabled={searching} aria-label="検索する">{searching?<LoaderCircle className="spin" size={17}/>:<><span>検索</span><Search size={17}/></>}</button></form>{searchError&&<div className="search-message" role="status">{searchError}</div>}{searchResults.length>0&&<div className="search-results" role="listbox" aria-label="検索候補">{searchResults.map((result,index)=><button key={result.id} role="option" aria-selected={searchTarget?.id===result.id} onClick={()=>chooseSearchResult(result)}><MapPin size={17}/><span><b>{index===0?'最上位候補：':''}{result.name}</b><small>{result.displayName}</small></span></button>)}</div>}</div>
     <section className="map-wrap">
       <MapContainer center={[35.5148,137.8218]} zoom={13} zoomControl={false} attributionControl={true} zoomAnimation={false} fadeAnimation={false} markerZoomAnimation={false} preferCanvas={true}>
-        <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" updateWhenIdle={true} updateWhenZooming={false} updateInterval={300} keepBuffer={1} maxNativeZoom={19} maxZoom={19}/>
-        <MapController locateToken={locateToken} searchTarget={searchTarget} onLocationFound={()=>showToast('現在地へ移動しました')} onLocationError={()=>showToast('現在地を取得できませんでした。地図や検索はそのまま利用できます')}/><MapClick onPick={p=>{setDraftPoint(p);setSelected(null);setSearchTarget(null);setSearchResults([])}}/>
-        {visiblePlaces.map(p=><Marker key={p.id} position={[p.lat,p.lng]} icon={selected===p.id?activePinIcon:defaultPinIcon} eventHandlers={{click:()=>{trackEvent('pin_click',{place_id:p.id,category:placePosts(p.id)[0]?.category});setSelected(p.id);setDraftPoint(null)}}}/>) }
+        <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" updateWhenIdle={false} updateWhenZooming={false} updateInterval={180} keepBuffer={2} maxNativeZoom={19} maxZoom={19}/>
+        <MapController locateToken={locateToken} searchTarget={searchTarget} onBoundsChange={handleBoundsChange} onLocationFound={()=>showToast('現在地へ移動しました')} onLocationError={()=>showToast('現在地を取得できませんでした。地図や検索はそのまま利用できます')}/><MapClick onPick={p=>{setDraftPoint(p);setSelected(null);setSearchTarget(null);setSearchResults([])}}/>
+        <MapMarkers places={visiblePlaces} selected={selected} postsByPlace={postsByPlace} onSelect={selectMarker}/>
         {draftPoint&&<Marker position={[draftPoint.lat,draftPoint.lng]} icon={draftIcon}/>} 
         {searchTarget&&<Marker position={[searchTarget.lat,searchTarget.lng]} icon={searchIcon}/>}
       </MapContainer>
